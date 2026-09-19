@@ -1,0 +1,50 @@
+import os
+import numpy as np
+
+# DATA PROCESSING INDICES
+RETARGETTING_INDICES = [0, 4, 9, 14, 19, 24]
+# 0 indices are set at the origin of palm, which is always zero
+VALID_RETARGETTING_INDICES = [4, 9, 14, 19, 24]
+
+# ===== Robot Controller INDICES =====
+CONTROLLER_UPPERBODY_INDICES = [*range(13, 20), 20, 22, 24, 26, 28, 29, *range(32, 39), 39, 41, 43, 45, 47, 48]
+
+# ===== URDF INDICES =====
+H1_HEAD_POS = [0.2, 0.0, 0.5]
+H1_ALL_INDICES = [i for i in range(51)]
+H1_BODY_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+H1_LEFT_ARM_INDICES = [13, 14, 15, 16, 17, 18, 19]
+H1_RIGHT_ARM_INDICES = [32, 33, 34, 35, 36, 37, 38]
+H1_LEFT_HAND_INDICES = [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+H1_RIGHT_HAND_INDICES = [39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+H1_MOTOR_INDICES = [13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 29, 32, 33, 34, 35, 36, 37, 38, 39, 41, 43, 45, 47, 48] # 26 dim
+
+# ===== Real-robot Interface (26-dim) after truncating first 13 indices =====
+### TODO: need to check if this is correct for H1_2_51dof
+H1_QPOS_LEFT_ELBOW_INDICES = [0, 1, 2, 3]
+H1_QPOS_LEFT_WRIST_INDICES = [4, 5, 6]
+H1_QPOS_LEFT_ARM_INDICES = H1_QPOS_LEFT_ELBOW_INDICES + H1_QPOS_LEFT_WRIST_INDICES
+H1_QPOS_LEFT_HAND_INDICES = [7, 8, 9, 10, 11, 12]
+H1_QPOS_RIGHT_ELBOW_INDICES = [13, 14, 15, 16]
+H1_QPOS_RIGHT_WRIST_INDICES = [17, 18, 19]
+H1_QPOS_RIGHT_ARM_INDICES = H1_QPOS_RIGHT_ELBOW_INDICES + H1_QPOS_RIGHT_WRIST_INDICES
+H1_QPOS_RIGHT_HAND_INDICES = [20, 21, 22, 23, 24, 25]
+
+# ===== HDT training state space indices (128-dim) =====
+# 9(position_3 +rotation_6) + 3 * 6 + 9 + 3 * 6 + 9 
+ACTION_STATE_VEC_SIZE = 128
+QPOS_INDICES = np.arange(100, 100 + 26)
+OUTPUT_LEFT_EEF = np.arange(80, 89)
+OUTPUT_RIGHT_EEF = np.arange(30, 39)
+OUTPUT_HEAD_EEF = np.arange(0, 9)
+OUTPUT_LEFT_KEYPOINTS = np.arange(10, 10 + 3 * len(RETARGETTING_INDICES))
+assert OUTPUT_LEFT_KEYPOINTS[-1] < OUTPUT_RIGHT_EEF[0]
+OUTPUT_RIGHT_KEYPOINTS = np.arange(40, 40 + 3 * len(RETARGETTING_INDICES))
+assert OUTPUT_RIGHT_KEYPOINTS[-1] < OUTPUT_LEFT_EEF[0]
+
+OUTPUT_INDEX = np.concatenate([OUTPUT_LEFT_EEF, OUTPUT_LEFT_KEYPOINTS, OUTPUT_RIGHT_EEF, OUTPUT_RIGHT_KEYPOINTS, OUTPUT_HEAD_EEF])
+
+# ===== Additional Setting =====
+STILL_HEAD_MAT = np.array([[0.95533649, 0, 0.29552021], [0, 1, 0], [-0.29552021, 0, 0.95533649]])
+
+

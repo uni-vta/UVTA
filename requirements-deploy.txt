@@ -1,0 +1,24 @@
+# Real-robot deployment only.  NOT needed to train or to evaluate offline.
+#
+# These are what `cet/relative_policy_rollout.py` pulls in, and they are why
+# that script cannot run on a training node.  Several are tied to hardware:
+#
+#   north_kinematics  -- IK for the arm used in the paper.  NOT on PyPI; it
+#                        ships with the robot.  A different arm means replacing
+#                        `cet/north_env.py` with an equivalent wrapper.
+#   eclipse-zenoh     -- the pub/sub transport the robot and the glove speak.
+#   PyTurboJPEG       -- decodes the wrist camera's MJPEG stream at 50 Hz;
+#                        cv2's decoder cannot keep up.
+#   pytorch3d         -- rotation conversions in the glove retargeting path.
+#   casadi            -- the retargeting optimizer's NLP backend.
+#
+# Install after requirements.txt.
+-r requirements.txt
+
+eclipse-zenoh
+PyTurboJPEG
+pytorch3d
+casadi==3.7.2
+orjson
+rich
+plotly

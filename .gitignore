@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Training outputs.  `experiments/` holds checkpoints (~1 GB each); `outputs/`
+# is hydra's default working dir when a run fails before run.dir is used.
+experiments/
+outputs/
+wandb/
+*.ckpt
+*.safetensors
+*.pickle
+
+# Datasets are distributed separately; see the Data section of the README.
+data/
+*.zarr/
+
+.vscode/
+.idea/
+.DS_Store
