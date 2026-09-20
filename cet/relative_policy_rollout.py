@@ -1,4 +1,4 @@
-"""North rollout driver for the UVTA relative-pose policy.
+"""Robot rollout driver for the UVTA relative-pose policy.
 
 Aligned with the *Method B* sample layout used by the trainer (see
 ``DexUMI/dexumi/diffusion_policy/dataloader/uvta_dataset.py`` and the
@@ -25,7 +25,7 @@ What this script does
 ---------------------
 
 1.  Pull one coherent observation bundle and its producer timestamp from
-    ``NorthEnv``; repeated polls of the same bundle are not inserted into the
+    ``RobotEnv``; repeated polls of the same bundle are not inserted into the
     policy history a second time.
 2.  Push each fresh image/proprio/tactile bundle into the policy's rolling
     observation buffer, whose strided horizon is selected internally.
@@ -35,7 +35,7 @@ What this script does
 4.  Sample continuous wrist (xyz + SO(3)) and hand trajectories at control
     rate, run warm-started arm IK, then apply arm/hand joint velocity and
     acceleration limits.
-5.  Send non-immediate commands through North's FIFO; monotonic deadlines
+5.  Send non-immediate commands through the robot's FIFO; monotonic deadlines
     skip missed ticks instead of emitting a catch-up burst.
 
 Proprio handling is automatic from ``policy.proprio_mode``; the legacy
@@ -62,21 +62,21 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 
-# ``north_env`` / ``north_kinematics`` are only available on the robot's
+# ``robot_env`` / ``arm_kinematics`` are only available on the robot's
 # deploy machine.  We still want this module to be importable from
 # off-robot scripts (smoke tests, IK benchmarks) so users can exercise
-# ``FingertipToJointIK`` / ``LightweightNorthIK`` standalone.  Defer the
+# ``FingertipToJointIK`` / ``LightweightIK`` standalone.  Defer the
 # hard failure to ``main()``.
 try:
-    from north_env import NorthEnv  # noqa: F401
-    import north_kinematics as nk  # noqa: F401
-    _NORTH_AVAILABLE = True
-    _NORTH_IMPORT_ERR: Optional[BaseException] = None
+    from robot_env import RobotEnv  # noqa: F401
+    import arm_kinematics as nk  # noqa: F401
+    _ROBOT_ENV_AVAILABLE = True
+    _ROBOT_ENV_IMPORT_ERR: Optional[BaseException] = None
 except ImportError as _e:  # noqa: BLE001
-    NorthEnv = None  # type: ignore[assignment]
+    RobotEnv = None  # type: ignore[assignment]
     nk = None  # type: ignore[assignment]
-    _NORTH_AVAILABLE = False
-    _NORTH_IMPORT_ERR = _e
+    _ROBOT_ENV_AVAILABLE = False
+    _ROBOT_ENV_IMPORT_ERR = _e
 
 try:
     from uvta.real_env.real_policy import RealPolicy  # noqa: F401
@@ -164,7 +164,7 @@ def ensure_rgb_hwc(img: np.ndarray) -> np.ndarray:
     if img.shape[-1] != 3:
         raise ValueError(f"Unexpected image shape: {img.shape}")
 
-    # North vision topics (.../rgb) already deliver RGB, matching the training
+    # robot vision topics (.../rgb) already deliver RGB, matching the training
     # data. Do NOT convert here: an extra BGR2RGB would swap channels and feed
     # the policy BGR (verified via debug/tmp/policy_input_*.png).
     return img.astype(np.uint8)
@@ -173,11 +173,11 @@ def ensure_rgb_hwc(img: np.ndarray) -> np.ndarray:
 # =========================================================
 # 观测读取
 # =========================================================
-def get_latest_robot_obs(north_env: NorthEnv) -> Dict[str, Any]:
-    latest_obs = north_env.get_latest_observation()
+def get_latest_robot_obs(robot_env: RobotEnv) -> Dict[str, Any]:
+    latest_obs = robot_env.get_latest_observation()
     while latest_obs is None:
         time.sleep(0.01)
-        latest_obs = north_env.get_latest_observation()
+        latest_obs = robot_env.get_latest_observation()
 
     def safe_array(key, dtype=np.float32):
         if key not in latest_obs:
@@ -203,16 +203,16 @@ def get_latest_robot_obs(north_env: NorthEnv) -> Dict[str, Any]:
         neck_dof = motor_angle[5:7].copy()
 
     return {
-        # North's producer-side timestamp plus the local callback timestamps.
+        # robot's producer-side timestamp plus the local callback timestamps.
         # Callback timestamps remain identical when a fast control loop polls
         # the same observation more than once, making duplicate detection
         # reliable even if the producer timestamp uses an unknown unit.
         "timestamp": latest_obs.get("timestamp"),
         "receive_wall_time_s": latest_obs.get(
-            "_north_receive_wall_time_s", time.time()
+            "_robot_receive_wall_time_s", time.time()
         ),
         "receive_monotonic_s": latest_obs.get(
-            "_north_receive_monotonic_s", time.monotonic()
+            "_robot_receive_monotonic_s", time.monotonic()
         ),
         "left_eye_img": left_eye_img,
         "right_eye_img": right_eye_img,
@@ -468,20 +468,20 @@ class _TactileLog:
 # =========================================================
 # 单臂 IK / FK
 # =========================================================
-class LightweightNorthIK:
-    """Thin wrapper around north_kinematics for single-arm FK / IK."""
+class LightweightIK:
+    """Thin wrapper around the arm IK backend for single-arm FK / IK."""
 
     # Mirror nk.ARM_DOF / nk.BODY_DOF.  Hard-coded so the class body does
-    # not crash when ``north_kinematics`` is not importable (smoke tests,
+    # not crash when ``arm_kinematics`` is not importable (smoke tests,
     # off-robot scripts); the actual values are also re-validated against
     # ``nk`` at runtime if the module is available.
     ARM_DOF = 7
     BODY_DOF = 5
 
     def __init__(self, urdf_path: str):
-        self._kin = nk.NorthKinematics()
+        self._kin = nk.ArmKinematics()
         if not self._kin.init(urdf_path):
-            raise RuntimeError(f"north_kinematics init failed: {urdf_path}")
+            raise RuntimeError(f"arm kinematics init failed: {urdf_path}")
 
     def fk(self, arm_angles: np.ndarray, body_angles: np.ndarray,
            side: str = "right") -> np.ndarray:
@@ -763,7 +763,7 @@ def recover_absolute_target_pose_from_relative(
 
 def get_current_wrist_pose6d(
     obs: Dict[str, Any],
-    ik_solver: Optional[LightweightNorthIK],
+    ik_solver: Optional[LightweightIK],
     side: str = "right",
 ) -> np.ndarray:
     """FK the measured joints of the ``side`` ('left'/'right') arm -> current
@@ -771,7 +771,7 @@ def get_current_wrist_pose6d(
     if ik_solver is None:
         raise RuntimeError(
             f"Cannot derive {side} wrist pose: no IK solver provided.  "
-            "Pass --urdf_path so LightweightNorthIK can be constructed."
+            "Pass --urdf_path so LightweightIK can be constructed."
         )
     T_wrist = ik_solver.fk(
         arm_angles=obs[f"{side}_arm"][::-1],  # sensor: [AJ1..AJ7] -> FK needs [AJ7..AJ1]
@@ -782,15 +782,15 @@ def get_current_wrist_pose6d(
 
 
 def get_current_right_wrist_pose6d(
-    obs: Dict[str, Any], ik_solver: Optional[LightweightNorthIK]
+    obs: Dict[str, Any], ik_solver: Optional[LightweightIK]
 ) -> np.ndarray:
     """Single-arm compatibility wrapper (right arm)."""
     return get_current_wrist_pose6d(obs, ik_solver, side="right")
 
 
 def reset_to_episode_start(
-    north_env: NorthEnv,
-    ik_solver: LightweightNorthIK,
+    robot_env: RobotEnv,
+    ik_solver: LightweightIK,
     zarr_root: str,
     episode: str,
     control_hz: float,
@@ -817,7 +817,7 @@ def reset_to_episode_start(
         f"pose0={np.array2string(pose0, precision=3)}"
     )
 
-    obs = get_latest_robot_obs(north_env)
+    obs = get_latest_robot_obs(robot_env)
     target4x4 = vec6dof_to_homogeneous_matrix(pose0[:3], pose0[3:])
     ik_success, ik_angles = ik_solver.ik(
         target_pose=target4x4,
@@ -850,14 +850,14 @@ def reset_to_episode_start(
 
     dt = 1.0 / control_hz
     for _ in range(max(1, hold_steps)):
-        obs = get_latest_robot_obs(north_env)
-        action_buffer = build_north_action_buffer(
+        obs = get_latest_robot_obs(robot_env)
+        action_buffer = build_robot_action_buffer(
             obs=obs,
             target_right_arm=target_right_arm,
             target_right_hand=hand0,
             mode=mode,
         )
-        north_env.send_action(action_buffer, immediate=True)
+        robot_env.send_action(action_buffer, immediate=True)
         time.sleep(dt)
     print("[reset2zero] reset complete; starting rollout.")
 
@@ -948,9 +948,9 @@ def convert_hand_action_fingertip(
 
 
 # =========================================================
-# 组装 North action buffer
+# assemble the robot action buffer
 # =========================================================
-def build_north_action_buffer(
+def build_robot_action_buffer(
     obs: Dict[str, Any],
     target_right_arm: np.ndarray,
     target_right_hand: np.ndarray,
@@ -1072,11 +1072,11 @@ def infer_policy_mode(policy) -> str:
     return _side_of_prefix(prefixes[0] if prefixes else "")
 
 
-def build_north_action_buffer_dual(
+def build_robot_action_buffer_dual(
     obs: Dict[str, Any],
     per_arm: Dict[str, Tuple[np.ndarray, np.ndarray]],
 ) -> Dict[str, np.ndarray]:
-    """Assemble a North action buffer that commands one OR both arms.
+    """Assemble a robot action buffer that commands one OR both arms.
 
     ``per_arm`` maps side ('left'/'right') -> (arm_angles(7), hand_angles(22)).
     Any arm NOT in ``per_arm`` is passed through from the current obs (held in
@@ -1106,7 +1106,7 @@ def build_north_action_buffer_dual(
 def _build_arm_proprio_inputs(
     obs: Dict[str, Any],
     proprio_mode: str,
-    ik_solver: LightweightNorthIK,
+    ik_solver: LightweightIK,
     side: str,
 ) -> Dict[str, Optional[np.ndarray]]:
     """Per-arm analogue of ``_build_per_step_proprio_inputs`` (one ``side``).
@@ -1132,7 +1132,7 @@ def _build_arm_proprio_inputs(
 def push_bimanual_observation(
     policy,
     obs: Dict[str, Any],
-    ik_solver: LightweightNorthIK,
+    ik_solver: LightweightIK,
     fallback_camera_source: str,
     uses_tactile: bool,
     tactile_key: str,
@@ -1213,7 +1213,7 @@ def decode_bimanual_action_step(act, arm_prefixes, hand_action_mode):
 
 
 def solve_arm_ik(
-    ik_solver: LightweightNorthIK,
+    ik_solver: LightweightIK,
     obs: Dict[str, Any],
     target_wrist_pose6d: np.ndarray,
     side: str,
@@ -1812,7 +1812,7 @@ def _can_import_finger_ik() -> bool:
 def _build_per_step_proprio_inputs(
     obs: Dict[str, Any],
     proprio_mode: str,
-    ik_solver: LightweightNorthIK,
+    ik_solver: LightweightIK,
     fingertip_fk: Optional[FingertipFK],
     legacy_joint_proprio: Optional[np.ndarray],
 ) -> Dict[str, Optional[np.ndarray]]:
@@ -2275,8 +2275,8 @@ def _decode_bimanual_absolute_chunks(
 def run_bimanual_rollout(
     args,
     policy,
-    north_env,
-    ik_solver: LightweightNorthIK,
+    robot_env,
+    ik_solver: LightweightIK,
     proprio_mode: str,
     hand_action_mode: str,
     action_horizon: int,
@@ -2293,7 +2293,7 @@ def run_bimanual_rollout(
     Per arm (``policy.arm_prefixes`` order): latch a wrist anchor at predict
     time, decode the arm's relative eef pose -> absolute -> IK(side) -> arm
     joints; decode the arm's hand action -> joint command; command BOTH arms
-    each step via ``build_north_action_buffer_dual``.
+    each step via ``build_robot_action_buffer_dual``.
     """
     if hand_action_mode in ("fingertip", "fingertip_only"):
         raise NotImplementedError(
@@ -2387,7 +2387,7 @@ def run_bimanual_rollout(
         print(f"[DEBUG] saving bimanual actions to {run_dir}")
 
     print("======================================")
-    print("Start North BIMANUAL rollout   [UNTESTED ON HARDWARE]")
+    print("Start BIMANUAL rollout   [UNTESTED ON HARDWARE]")
     print(f"  model_path        : {args.model_path} (ckpt={args.ckpt})")
     print(f"  arms              : {arm_prefixes}")
     print(f"  cameras           : {policy.camera_ids}")
@@ -2396,7 +2396,7 @@ def run_bimanual_rollout(
     print(f"  action_horizon    : {action_horizon}  (executable = {chunk_exec_steps})")
     print(f"  control/waypoint  : {args.control_hz:g} / {args.waypoint_hz:g} Hz")
     print(
-        "  observation time  : North producer timestamp when valid; "
+        "  observation time  : robot producer timestamp when valid; "
         "otherwise callback monotonic receive time"
     )
     print(
@@ -2419,7 +2419,7 @@ def run_bimanual_rollout(
     debug_step = 0
     try:
         while True:
-            obs = get_latest_robot_obs(north_env)
+            obs = get_latest_robot_obs(robot_env)
             obs_stamp = obs_timeline.append(obs)
 
             if obs_stamp is not None:
@@ -2519,7 +2519,7 @@ def run_bimanual_rollout(
                 ) * waypoint_dt
                 act_index = ANCHOR_OFFSET
                 timestamp_source = (
-                    "north" if obs_stamp.used_source_timestamp else "receive"
+                    "robot" if obs_stamp.used_source_timestamp else "receive"
                 )
                 print(
                     f"New timestamped bimanual chunk: {output.shape} "
@@ -2599,8 +2599,8 @@ def run_bimanual_rollout(
                 per_arm_cmd[side] = (target_arm, target_hand)
 
             # 7) send BOTH arms
-            action_buffer = build_north_action_buffer_dual(obs, per_arm_cmd)
-            north_env.send_action(action_buffer, immediate=False)
+            action_buffer = build_robot_action_buffer_dual(obs, per_arm_cmd)
+            robot_env.send_action(action_buffer, immediate=False)
             debug_step += 1
 
             # 8) optional display (first camera)
@@ -2611,7 +2611,7 @@ def run_bimanual_rollout(
                     show_img, f"step={debug_step} act_index={act_index}",
                     (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
                 )
-                cv2.imshow("north_bimanual_rollout", show_img)
+                cv2.imshow("robot_bimanual_rollout", show_img)
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
                     print("Quit by keyboard.")
                     break
@@ -2637,11 +2637,11 @@ def run_bimanual_rollout(
 
 def main(args):
     # -------- hard-required deploy deps --------
-    if not _NORTH_AVAILABLE:
+    if not _ROBOT_ENV_AVAILABLE:
         raise RuntimeError(
-            "north_env / north_kinematics not importable -- this script "
+            "robot_env / arm_kinematics not importable -- this script "
             "can only run on the robot's deploy machine.  "
-            f"(original error: {_NORTH_IMPORT_ERR})"
+            f"(original error: {_ROBOT_ENV_IMPORT_ERR})"
         )
     if not _REAL_POLICY_AVAILABLE:
         raise RuntimeError(
@@ -2697,7 +2697,7 @@ def main(args):
         raise ValueError("control_hz and waypoint_hz must be positive.")
     if args.control_hz > 60.0:
         raise ValueError(
-            "control_hz must not exceed North's ~60-Hz action publisher "
+            "control_hz must not exceed robot's ~60-Hz action publisher "
             "when timestamp smoothing uses non-immediate FIFO commands."
         )
     if args.observation_buffer_size <= 0:
@@ -2744,7 +2744,7 @@ def main(args):
                 "fix the env or retrain with hand_action_mode='joint'."
             )
 
-    # -------- NorthEnv --------
+    # -------- RobotEnv --------
     # The tactile keys (``/observe/tactile/<finger>/force6d`` etc.) are only
     # populated in the live obs when ``enable_tactile=True``.  If the trained
     # policy consumes tactile, force it on regardless of the CLI flag so
@@ -2753,10 +2753,10 @@ def main(args):
     enable_tactile = bool(args.enable_tactile) or policy_uses_tactile
     if policy_uses_tactile and not args.enable_tactile:
         print(
-            "[tactile] policy requires tactile -> auto-enabling NorthEnv "
+            "[tactile] policy requires tactile -> auto-enabling RobotEnv "
             "tactile stream (override the --enable_tactile flag)."
         )
-    north_env = NorthEnv(
+    robot_env = RobotEnv(
         enable_tactile=enable_tactile,
         action_output=[
             "/action/left_arm/joint_angle",
@@ -2768,7 +2768,7 @@ def main(args):
     )
 
     # -------- IK/FK --------
-    ik_solver = LightweightNorthIK(args.urdf_path)
+    ik_solver = LightweightIK(args.urdf_path)
 
     # -------- bimanual dispatch --------
     # A bimanual policy (arms=['left_','right_']) decodes a concatenated
@@ -2778,7 +2778,7 @@ def main(args):
         return run_bimanual_rollout(
             args=args,
             policy=policy,
-            north_env=north_env,
+            robot_env=robot_env,
             ik_solver=ik_solver,
             proprio_mode=proprio_mode,
             hand_action_mode=hand_action_mode,
@@ -3017,14 +3017,14 @@ def main(args):
 
     legacy_joint_proprio: Optional[np.ndarray] = None
     print("======================================")
-    print("Start North rollout with relative policy")
+    print("Start Rollout with relative policy")
     print(f"  model_path        : {args.model_path}")
     print(f"  ckpt              : {args.ckpt}")
     print(f"  use_ema           : {args.use_ema if args.use_ema is not None else '(follow config)'}")
     print(f"  control_hz        : {args.control_hz}")
     print(f"  waypoint_hz       : {args.waypoint_hz}")
     print(
-        "  observation time  : North producer timestamp when valid; "
+        "  observation time  : robot producer timestamp when valid; "
         "otherwise callback monotonic receive time"
     )
     print(
@@ -3084,7 +3084,7 @@ def main(args):
     # starting the rollout, so inference always begins from a known pose.
     if args.reset2zero:
         reset_to_episode_start(
-            north_env=north_env,
+            robot_env=robot_env,
             ik_solver=ik_solver,
             zarr_root=args.reset2zero_zarr_root,
             episode=args.reset2zero_episode,
@@ -3097,11 +3097,11 @@ def main(args):
 
     try:
         while True:
-            obs = get_latest_robot_obs(north_env)
+            obs = get_latest_robot_obs(robot_env)
             obs_stamp = obs_timeline.append(obs)
 
             # The current frame is retained for debug/display every tick, but
-            # only a fresh coherent North bundle is allowed into policy history.
+            # only a fresh coherent robot bundle is allowed into policy history.
             visual_obs_rgb = choose_visual_obs(obs, args.camera_source)
             if policy_uses_tactile:
                 fsr = build_tactile_from_obs(obs, policy_tactile_key)
@@ -3334,7 +3334,7 @@ def main(args):
                             f"accepted; ramping for {args.startup_ramp_s:.2f}s."
                         )
                 timestamp_source = (
-                    "north"
+                    "robot"
                     if prediction_result.used_source_timestamp
                     else "receive"
                 )
@@ -3522,7 +3522,7 @@ def main(args):
             # solution whose FK is hundreds of mm off, which drives the arm in
             # the wrong direction.  So we do NOT trust ``ik_success`` alone:
             # we FK the returned solution and reject it when the pose error
-            # exceeds the tolerances.  This mirrors ``verify_north_ik.py``,
+            # exceeds the tolerances.  This mirrors ``verify_ik.py``,
             # which also scores IK quality via FK residual rather than the
             # raw success flag.
             ik_pos_err = 0.0 if startup_hard_hold else float("inf")
@@ -3599,13 +3599,13 @@ def main(args):
             # continuously above before their final kinematic limiter.
 
             # 8) send
-            action_buffer = build_north_action_buffer(
+            action_buffer = build_robot_action_buffer(
                 obs=obs,
                 target_right_arm=target_right_arm,
                 target_right_hand=target_right_hand,
                 mode=mode,
             )
-            north_env.send_action(action_buffer, immediate=False)
+            robot_env.send_action(action_buffer, immediate=False)
 
             # 9) optional live display
             if enable_show:
@@ -3614,7 +3614,7 @@ def main(args):
                 txt2 = f"rel_pose={np.array2string(relative_pose6d, precision=3)}"
                 cv2.putText(show_img, txt1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(show_img, txt2[:80], (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-                cv2.imshow("north_relative_policy_rollout", show_img)
+                cv2.imshow("robot_relative_policy_rollout", show_img)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     print("Quit by keyboard.")
@@ -3728,7 +3728,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("North rollout with the UVTA relative-control policy")
+    parser = argparse.ArgumentParser("Rollout with the UVTA relative-control policy")
 
     # policy
     parser.add_argument("--model_path", type=str, required=True, help="UVTA training output dir")
@@ -3762,7 +3762,7 @@ if __name__ == "__main__":
         "--observation_buffer_size",
         type=int,
         default=256,
-        help="Unique timestamped North observations retained for diagnostics.",
+        help="Unique timestamped robot observations retained for diagnostics.",
     )
     parser.add_argument(
         "--observation_timestamp_max_skew_s",
@@ -3858,9 +3858,9 @@ if __name__ == "__main__":
         type=str,
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "allset_kinematics/urdf/north_poc2_2_description/urdf/north_poc2_2_modified.urdf",
+            "allset_kinematics/urdf/robot_description/urdf/robot_model.urdf",
         ),
-        help="north urdf path",
+        help="arm URDF path",
     )
 
     # IK acceptance tolerances.  ``calc_single_arm_ik``'s success flag is

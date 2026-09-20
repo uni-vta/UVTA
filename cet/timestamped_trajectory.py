@@ -1,4 +1,4 @@
-"""Shared timestamped trajectory smoothing for North rollout scripts."""
+"""Shared timestamped trajectory smoothing for robot rollout scripts."""
 from __future__ import annotations
 
 import time
@@ -180,7 +180,7 @@ def schedule_absolute_trajectory_chunk(
     int,
     int,
 ]:
-    """Schedule absolute wrist/hand chunks on their North observation time.
+    """Schedule absolute wrist/hand chunks on their robot observation time.
 
     Stale waypoints are discarded. The first point of each replacement
     interpolator is sampled from the old interpolator at now, providing C0

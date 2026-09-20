@@ -3,9 +3,9 @@
 # These are what `cet/relative_policy_rollout.py` pulls in, and they are why
 # that script cannot run on a training node.  Several are tied to hardware:
 #
-#   north_kinematics  -- IK for the arm used in the paper.  NOT on PyPI; it
+#   arm_kinematics  -- IK for the arm used in the paper.  NOT on PyPI; it
 #                        ships with the robot.  A different arm means replacing
-#                        `cet/north_env.py` with an equivalent wrapper.
+#                        `cet/robot_env.py` with an equivalent wrapper.
 #   eclipse-zenoh     -- the pub/sub transport the robot and the glove speak.
 #   PyTurboJPEG       -- decodes the wrist camera's MJPEG stream at 50 Hz;
 #                        cv2's decoder cannot keep up.

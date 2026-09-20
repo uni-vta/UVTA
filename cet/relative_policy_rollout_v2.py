@@ -1,4 +1,4 @@
-"""North rollout v2: receding-horizon + trajectory-interpolation smoothing.
+"""Robot rollout v2: receding-horizon + trajectory-interpolation smoothing.
 
 Same Method-B relative-pose policy as ``relative_policy_rollout.py``, but the
 action-chunk execution path follows DexUMI ``eval_xhand.py`` rather than ACT
@@ -8,7 +8,7 @@ temporal ensembling (that lives in ``relative_policy_rollout_v1.py``):
         -> relative pose -> absolute pose
         -> discard past actions by latency
         -> schedule_waypoint -> Pose/Motor trajectory interpolation
-        -> sample interpolators each control step -> arm IK -> North
+        -> sample interpolators each control step -> arm IK -> the robot
         -> after exec_horizon * dt, replan (no cross-chunk weighted mix)
 
 Aligned with the *Method B* sample layout used by the trainer (see
@@ -46,21 +46,21 @@ import scipy.interpolate as si
 import scipy.spatial.transform as st
 from scipy.spatial.transform import Rotation as R
 
-# ``north_env`` / ``north_kinematics`` are only available on the robot's
+# ``robot_env`` / ``arm_kinematics`` are only available on the robot's
 # deploy machine.  We still want this module to be importable from
 # off-robot scripts (smoke tests, IK benchmarks) so users can exercise
-# ``FingertipToJointIK`` / ``LightweightNorthIK`` standalone.  Defer the
+# ``FingertipToJointIK`` / ``LightweightIK`` standalone.  Defer the
 # hard failure to ``main()``.
 try:
-    from north_env import NorthEnv  # noqa: F401
-    import north_kinematics as nk  # noqa: F401
-    _NORTH_AVAILABLE = True
-    _NORTH_IMPORT_ERR: Optional[BaseException] = None
+    from robot_env import RobotEnv  # noqa: F401
+    import arm_kinematics as nk  # noqa: F401
+    _ROBOT_ENV_AVAILABLE = True
+    _ROBOT_ENV_IMPORT_ERR: Optional[BaseException] = None
 except ImportError as _e:  # noqa: BLE001
-    NorthEnv = None  # type: ignore[assignment]
+    RobotEnv = None  # type: ignore[assignment]
     nk = None  # type: ignore[assignment]
-    _NORTH_AVAILABLE = False
-    _NORTH_IMPORT_ERR = _e
+    _ROBOT_ENV_AVAILABLE = False
+    _ROBOT_ENV_IMPORT_ERR = _e
 
 try:
     from uvta.real_env.real_policy import RealPolicy  # noqa: F401
@@ -140,7 +140,7 @@ def ensure_rgb_hwc(img: np.ndarray) -> np.ndarray:
     if img.shape[-1] != 3:
         raise ValueError(f"Unexpected image shape: {img.shape}")
 
-    # North vision topics (.../rgb) already deliver RGB, matching the training
+    # robot vision topics (.../rgb) already deliver RGB, matching the training
     # data. Do NOT convert here: an extra BGR2RGB would swap channels and feed
     # the policy BGR (verified via debug/tmp/policy_input_*.png).
     return img.astype(np.uint8)
@@ -149,11 +149,11 @@ def ensure_rgb_hwc(img: np.ndarray) -> np.ndarray:
 # =========================================================
 # 观测读取
 # =========================================================
-def get_latest_robot_obs(north_env: NorthEnv) -> Dict[str, Any]:
-    latest_obs = north_env.get_latest_observation()
+def get_latest_robot_obs(robot_env: RobotEnv) -> Dict[str, Any]:
+    latest_obs = robot_env.get_latest_observation()
     while latest_obs is None:
         time.sleep(0.01)
-        latest_obs = north_env.get_latest_observation()
+        latest_obs = robot_env.get_latest_observation()
 
     def safe_array(key, dtype=np.float32):
         if key not in latest_obs:
@@ -287,20 +287,20 @@ def build_tactile_from_obs(
 # =========================================================
 # 单臂 IK / FK
 # =========================================================
-class LightweightNorthIK:
-    """Thin wrapper around north_kinematics for single-arm FK / IK."""
+class LightweightIK:
+    """Thin wrapper around the arm IK backend for single-arm FK / IK."""
 
     # Mirror nk.ARM_DOF / nk.BODY_DOF.  Hard-coded so the class body does
-    # not crash when ``north_kinematics`` is not importable (smoke tests,
+    # not crash when ``arm_kinematics`` is not importable (smoke tests,
     # off-robot scripts); the actual values are also re-validated against
     # ``nk`` at runtime if the module is available.
     ARM_DOF = 7
     BODY_DOF = 5
 
     def __init__(self, urdf_path: str):
-        self._kin = nk.NorthKinematics()
+        self._kin = nk.ArmKinematics()
         if not self._kin.init(urdf_path):
-            raise RuntimeError(f"north_kinematics init failed: {urdf_path}")
+            raise RuntimeError(f"arm kinematics init failed: {urdf_path}")
 
     def fk(self, arm_angles: np.ndarray, body_angles: np.ndarray,
            side: str = "right") -> np.ndarray:
@@ -581,12 +581,12 @@ def recover_absolute_target_pose_from_relative(
 
 
 def get_current_right_wrist_pose6d(
-    obs: Dict[str, Any], ik_solver: Optional[LightweightNorthIK]
+    obs: Dict[str, Any], ik_solver: Optional[LightweightIK]
 ) -> np.ndarray:
     if ik_solver is None:
         raise RuntimeError(
             "Cannot derive right wrist pose: no IK solver provided.  "
-            "Pass --urdf_path so LightweightNorthIK can be constructed."
+            "Pass --urdf_path so LightweightIK can be constructed."
         )
     T_wrist = ik_solver.fk(
         arm_angles=obs["right_arm"][::-1],   # sensor: [AJ1..AJ7] -> FK needs [AJ7..AJ1]
@@ -597,8 +597,8 @@ def get_current_right_wrist_pose6d(
 
 
 def reset_to_episode_start(
-    north_env: NorthEnv,
-    ik_solver: LightweightNorthIK,
+    robot_env: RobotEnv,
+    ik_solver: LightweightIK,
     zarr_root: str,
     episode: str,
     control_hz: float,
@@ -625,7 +625,7 @@ def reset_to_episode_start(
         f"pose0={np.array2string(pose0, precision=3)}"
     )
 
-    obs = get_latest_robot_obs(north_env)
+    obs = get_latest_robot_obs(robot_env)
     target4x4 = vec6dof_to_homogeneous_matrix(pose0[:3], pose0[3:])
     ik_success, ik_angles = ik_solver.ik(
         target_pose=target4x4,
@@ -658,14 +658,14 @@ def reset_to_episode_start(
 
     dt = 1.0 / control_hz
     for _ in range(max(1, hold_steps)):
-        obs = get_latest_robot_obs(north_env)
-        action_buffer = build_north_action_buffer(
+        obs = get_latest_robot_obs(robot_env)
+        action_buffer = build_robot_action_buffer(
             obs=obs,
             target_right_arm=target_right_arm,
             target_right_hand=hand0,
             mode=mode,
         )
-        north_env.send_action(action_buffer, immediate=True)
+        robot_env.send_action(action_buffer, immediate=True)
         time.sleep(dt)
     print("[reset2zero] reset complete; starting rollout.")
 
@@ -752,9 +752,9 @@ def convert_hand_action_fingertip(
 
 
 # =========================================================
-# 组装 North action buffer
+# assemble the robot action buffer
 # =========================================================
-def build_north_action_buffer(
+def build_robot_action_buffer(
     obs: Dict[str, Any],
     target_right_arm: np.ndarray,
     target_right_hand: np.ndarray,
@@ -1325,7 +1325,7 @@ def _can_import_finger_ik() -> bool:
 def _build_per_step_proprio_inputs(
     obs: Dict[str, Any],
     proprio_mode: str,
-    ik_solver: LightweightNorthIK,
+    ik_solver: LightweightIK,
     fingertip_fk: Optional[FingertipFK],
     legacy_joint_proprio: Optional[np.ndarray],
 ) -> Dict[str, Optional[np.ndarray]]:
@@ -1722,11 +1722,11 @@ def _schedule_chunk_into_interpolators(
 
 def main(args):
     # -------- hard-required deploy deps --------
-    if not _NORTH_AVAILABLE:
+    if not _ROBOT_ENV_AVAILABLE:
         raise RuntimeError(
-            "north_env / north_kinematics not importable -- this script "
+            "robot_env / arm_kinematics not importable -- this script "
             "can only run on the robot's deploy machine.  "
-            f"(original error: {_NORTH_IMPORT_ERR})"
+            f"(original error: {_ROBOT_ENV_IMPORT_ERR})"
         )
     if not _REAL_POLICY_AVAILABLE:
         raise RuntimeError(
@@ -1766,9 +1766,9 @@ def main(args):
             "(and per-arm proprio if proprio_mode!='none');\n"
             "  2. per-arm anchor pose + relative->absolute decode "
             "(RealPolicy returns [left|right] concatenated action blocks);\n"
-            "  3. per-arm IK (LightweightNorthIK side='left'/'right') + "
+            "  3. per-arm IK (LightweightIK side='left'/'right') + "
             "per-arm receding-horizon interpolators;\n"
-            "  4. send both /action/left_arm & /action/right_arm (NorthEnv "
+            "  4. send both /action/left_arm & /action/right_arm (RobotEnv "
             "already exposes both).\n"
             "Validate offline first: scripts/smoke_bimanual_rollout.py "
             "--zarr data/chips_teleop --episode <ep>."
@@ -1793,8 +1793,8 @@ def main(args):
                 "fix the env or retrain with hand_action_mode='joint'."
             )
 
-    # -------- NorthEnv --------
-    north_env = NorthEnv(
+    # -------- RobotEnv --------
+    robot_env = RobotEnv(
         enable_tactile=args.enable_tactile,
         action_output=[
             "/action/left_arm/joint_angle",
@@ -1806,7 +1806,7 @@ def main(args):
     )
 
     # -------- IK/FK --------
-    ik_solver = LightweightNorthIK(args.urdf_path)
+    ik_solver = LightweightIK(args.urdf_path)
     fingertip_fk: Optional[FingertipFK] = None
     if proprio_mode in ("fingertip", "fingertip_with_ee"):
         fingertip_fk = FingertipFK(hand_type="right")
@@ -1972,7 +1972,7 @@ def main(args):
 
     legacy_joint_proprio: Optional[np.ndarray] = None
     print("======================================")
-    print("Start North rollout with relative policy (v2 DexUMI smoothing)")
+    print("Start Rollout with relative policy (v2 DexUMI smoothing)")
     print(f"  model_path        : {args.model_path}")
     print(f"  ckpt              : {args.ckpt}")
     print(f"  use_ema           : {args.use_ema if args.use_ema is not None else '(follow config)'}")
@@ -2027,7 +2027,7 @@ def main(args):
     # starting the rollout, so inference always begins from a known pose.
     if args.reset2zero:
         reset_to_episode_start(
-            north_env=north_env,
+            robot_env=robot_env,
             ik_solver=ik_solver,
             zarr_root=args.reset2zero_zarr_root,
             episode=args.reset2zero_episode,
@@ -2040,7 +2040,7 @@ def main(args):
 
     # Seed trajectory interpolators with the live state so the first
     # schedule_waypoint has a valid trim origin (DexUMI starts the same way).
-    _seed_obs = get_latest_robot_obs(north_env)
+    _seed_obs = get_latest_robot_obs(robot_env)
     _seed_pose = get_current_right_wrist_pose6d(_seed_obs, ik_solver)
     _seed_hand = _seed_obs["right_hand"].astype(np.float32)
     _seed_t = time.time()
@@ -2059,7 +2059,7 @@ def main(args):
 
             # 1) latest observation
             for i in range(100):
-                obs = get_latest_robot_obs(north_env)
+                obs = get_latest_robot_obs(robot_env)
 
             # 2) pick the camera frame and push to the rolling buffer
             visual_obs_rgb = choose_visual_obs(obs, args.camera_source)
@@ -2225,7 +2225,7 @@ def main(args):
             # solution whose FK is hundreds of mm off, which drives the arm in
             # the wrong direction.  So we do NOT trust ``ik_success`` alone:
             # we FK the returned solution and reject it when the pose error
-            # exceeds the tolerances.  This mirrors ``verify_north_ik.py``,
+            # exceeds the tolerances.  This mirrors ``verify_ik.py``,
             # which also scores IK quality via FK residual rather than the
             # raw success flag.
             ik_pos_err = float("inf")
@@ -2279,13 +2279,13 @@ def main(args):
             # (fingertip IK / relative-joint decode happened at schedule time).
 
             # 8) send
-            action_buffer = build_north_action_buffer(
+            action_buffer = build_robot_action_buffer(
                 obs=obs,
                 target_right_arm=target_right_arm,
                 target_right_hand=target_right_hand,
                 mode=mode,
             )
-            north_env.send_action(action_buffer, immediate=True)
+            robot_env.send_action(action_buffer, immediate=True)
 
             # 9) optional live display
             if enable_show:
@@ -2294,7 +2294,7 @@ def main(args):
                 txt2 = f"rel_pose={np.array2string(relative_pose6d, precision=3)}"
                 cv2.putText(show_img, txt1, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(show_img, txt2[:80], (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-                cv2.imshow("north_relative_policy_rollout_v2", show_img)
+                cv2.imshow("robot_relative_policy_rollout_v2", show_img)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     print("Quit by keyboard.")
@@ -2387,7 +2387,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        "North rollout v2 with DexUMI receding-horizon + trajectory interpolation"
+        "Robot rollout v2 with DexUMI receding-horizon + trajectory interpolation"
     )
 
     # policy
@@ -2449,9 +2449,9 @@ if __name__ == "__main__":
         type=str,
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "allset_kinematics/urdf/north_poc2_2_description/urdf/north_poc2_2_modified.urdf",
+            "allset_kinematics/urdf/robot_description/urdf/robot_model.urdf",
         ),
-        help="north urdf path",
+        help="arm URDF path",
     )
 
     # IK acceptance tolerances.  ``calc_single_arm_ik``'s success flag is

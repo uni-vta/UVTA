@@ -1,6 +1,6 @@
-"""Timestamp-aware North observation buffering for real-time rollouts.
+"""Timestamp-aware robot observation buffering for real-time rollouts.
 
-North provides a producer timestamp in each observation bundle. The callback
+the robot provides a producer timestamp in each observation bundle. The callback
 also records local wall and monotonic receive times. This module maps a
 clock-synchronised producer timestamp onto the local monotonic control timeline,
 falls back safely when the producer clock/unit is not credible, and suppresses
@@ -48,9 +48,9 @@ def producer_timestamp_to_wall_seconds(
     receive_wall_time_s: float,
     max_clock_skew_s: float,
 ) -> Optional[float]:
-    """Convert a North producer timestamp to epoch seconds when credible.
+    """Convert a robot producer timestamp to epoch seconds when credible.
 
-    Numeric North deployments have used seconds, milliseconds, microseconds,
+    Numeric deployments have used seconds, milliseconds, microseconds,
     and nanoseconds. Select the scale closest to the local receive wall time.
     A protobuf Timestamp-like object with seconds/nanos is also accepted. A
     value is rejected when the resulting clock skew is too large; scheduling
@@ -89,11 +89,11 @@ def producer_timestamp_to_wall_seconds(
 
 
 class ObservationTimestampBuffer:
-    """Bounded, monotonic buffer of unique North observations.
+    """Bounded, monotonic buffer of unique robot observations.
 
     append returns None when the control loop has merely polled the same
     callback result again. This prevents a 100-Hz policy loop from filling the
-    model history with duplicates from a roughly 30-Hz North stream.
+    model history with duplicates from a roughly 30-Hz robot stream.
     """
 
     def __init__(
