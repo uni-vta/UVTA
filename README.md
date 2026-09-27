@@ -74,28 +74,28 @@ Training and offline evaluation need none of them.
 
 ## Data format
 
-Each dataset is one zarr store of per-episode groups:
+The dataset lays every task out identically, so one config covers all five:
 
 ```
-book_teleop/                 # robot, 149 episodes
-  episode_0/
-    camera_0/rgb    (T, 384, 480, 3) uint8   wrist camera
-    camera_1/rgb    (T, 384, 480, 3) uint8   ego camera (unused by this config)
-    pose            (T, 6)  float32          wrist pose, xyz + rotvec
-    pose_action     (T, 6)  float32          commanded wrist pose
-    proprioception  (T, 22) float32          hand joint angles, measured
-    hand_action     (T, 22) float32          hand joint angles, commanded
-    fsr             (T, 100) float32         raw taxels, 5 fingers x 20
-    fsr_region      (T, 20) float32          <- what the policy consumes
-    force           (T, 5)  float32          per-finger resultant
-    tactile         (T, 5, 240, 240) uint8   raw deformation images
-book_skeleton/               # human, 3074 episodes -- same layout, no `tactile`
+<data_root>/
+  flip_book/          light_bulb/  switch/  ball/  tube/
+    robot/            # 150 teleoperated episodes (149 for flip_book)
+      episode_0/
+        camera_0/rgb   (T, 384, 480, 3) uint8   right-wrist camera
+        pose           (T, 6)  float32          wrist pose, xyz + rotvec
+        pose_action    (T, 6)  float32          commanded wrist pose
+        proprioception (T, 22) float32          hand joint angles, measured
+        hand_action    (T, 22) float32          hand joint angles, commanded
+        tactile        (T, 20) float32          <- see below
+      episode_1/ ...
+    human/            # 1000 glove-worn human episodes, same fields
 ```
 
-`fsr_region` pools each finger's 20 taxels into 4 region means
-([deform_to_human/fsr_region.py](deform_to_human/fsr_region.py) is the single
-source of truth for that partition, and deployment re-applies it to the live
-stream). It is **precomputed in the zarr**, so training never imports that module.
+`tactile` is the 20-D **region** representation: each finger's 20 taxels pooled
+into 4 region means, by
+[deform_to_human/fsr_region.py](deform_to_human/fsr_region.py), which is also
+what deployment applies to the live stream. The raw 100-D taxel vector and the
+240x240 deformation images are not part of the release.
 
 Two properties of the tactile stream are load-bearing and easy to get wrong:
 
@@ -106,18 +106,33 @@ Two properties of the tactile stream are load-bearing and easy to get wrong:
   is either a hard zero or a constant per-session DC offset, so subtracting its
   *first frame* estimates it exactly. The glove's rest is noisy (std ~2 within
   the window), so the human stream subtracts the *mean of 5 frames*. Both clamp
-  at zero so `0` means "no contact" on both sides. See `fsr_baseline_*` in the config.
+  at zero so `0` means "no contact" on both sides. This happens at load time,
+  keyed on embodiment rather than on directory name — see `fsr_baseline_*` in
+  the config.
 
 ## Train
 
 ```bash
-python scripts/train.py                  # single process
-accelerate launch scripts/train.py       # multi-GPU
+python scripts/train.py                        # flip_book, single process
+python scripts/train.py task=switch            # any of the five tasks
+accelerate launch scripts/train.py task=ball   # multi-GPU
 ```
 
-Everything comes from [configs/flip_book.yaml](configs/flip_book.yaml); override
-on the command line in Hydra syntax, e.g.
-`training.epochs=300 dataset.max_episode=[null,1000]`.
+[configs/flip_book.yaml](configs/flip_book.yaml) is the only config — `task`
+selects which of `flip_book | light_bulb | switch | ball | tube` to train, and
+everything else is shared. Override anything else in Hydra syntax.
+
+The one per-task difference in the paper: **light_bulb used 500 epochs**, the
+rest 300.
+
+```bash
+python scripts/train.py task=light_bulb training.epochs=500
+```
+
+The cosine LR horizon is `${training.epochs}`, so it follows automatically.
+Setting the two independently is how a 300-epoch run ends up on a 500-epoch
+cosine, which leaves the learning rate un-annealed at the end and costs real
+accuracy.
 
 ### The one setting that will bite you
 

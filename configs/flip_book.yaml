@@ -8,13 +8,27 @@
 uvta_root: ${oc.env:UVTA_ROOT}
 # Where the zarr datasets live.  Defaults to <UVTA_ROOT>/data.
 data_root: ${oc.env:UVTA_DATA_ROOT,${oc.env:UVTA_ROOT}/data}
+
+# ------------------------------------------------------------------
+# Which task to train.  ONE config covers all five: the released dataset
+# lays every task out identically as <data_root>/<task>/{robot,human},
+# with the episode counts already capped at collection time, so the task
+# name is the only thing that varies.
+#
+#   python scripts/train.py task=switch
+#
+# One caveat: the light_bulb result in the paper used 500 epochs, the rest
+# 300.  Pass `training.epochs=500` for that task -- the LR schedule follows
+# automatically (see lr_scheduler_steps_epochs below).
+# ------------------------------------------------------------------
+task: flip_book   # flip_book | light_bulb | switch | ball | tube
 hydra:
   run:
     dir: ${oc.env:UVTA_OUTPUT_DIR,${oc.env:UVTA_ROOT}/experiments}/${now:%Y-%m-%d_%H-%M-%S}
 
 
 project_name: UVTA
-task_name: flip_book
+task_name: ${task}
 
 
 debug: False
@@ -106,9 +120,9 @@ validation:
   # episodes that are NOT in dataset.data_dirs below -- as written it would
   # re-score the training set, which tells you nothing.
   datasets:
-    - name: teleop
+    - name: robot
       data_dirs: [
-        "${data_root}/book_teleop",
+        "${data_root}/${task}/robot",
       ]
       data_dirs_embodiment: [robot]
 
@@ -135,7 +149,7 @@ num_warmup_steps: 300
 # a cosine over this many epochs, so leaving it at 500 for a 300-epoch run ends
 # training at ~35% of peak LR with the loss still visibly descending -- the run
 # is truncated, not converged.  Change both together, including on the CLI.
-lr_scheduler_steps_epochs: 300
+lr_scheduler_steps_epochs: ${training.epochs}
 lr_min_ratio: 1e-2
 
 dataset:
@@ -145,8 +159,8 @@ dataset:
   # (same length / order).  human -> no camera ring; robot -> has the ring.
   # ------------------------------------------------------------------
   data_dirs: [
-    "${data_root}/book_teleop",
-    "${data_root}/book_skeleton",
+    "${data_root}/${task}/robot",
+    "${data_root}/${task}/human",
   ]
   data_dirs_embodiment: [robot, human]
   load_camera_ids: [0]
@@ -193,7 +207,7 @@ dataset:
   # TACTILE input (also the tactile block's target).
   # ------------------------------------------------------------------
   enable_fsr: True
-  fsr_source_key: fsr_region
+  fsr_source_key: tactile
   fsr_binarize: False
   fsr_binary_cutoff: [100]
   fsr_baseline_correct: True
@@ -211,7 +225,7 @@ dataset:
   bgr2rgb: False
   # Per-dataset episode budget, aligned to data_dirs in the same order.
   # ``null`` = all episodes of that dataset.
-  max_episode: [null, 1000]
+  max_episode: [null, null]
 
 
 model:
