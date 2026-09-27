@@ -1,25 +1,9 @@
-"""Does adding auxiliary output blocks degrade the EXECUTED action at inference?
+"""Evaluate sampled action accuracy and temporal roughness on robot episodes.
 
-Training loss cannot answer this.  It is an epsilon-prediction MSE over the whole
-target, whereas deploy runs the full reverse diffusion, in which every dimension
-is denoised jointly through one shared UNet -- so residual uncertainty in the
-state / tactile dimensions can leak into the action dimensions at every step.
-Small, precise motions are exactly what such cross-dimension noise swamps.
+Runs the reverse-diffusion sampler and decodes actions as in deployment.
+Reports per-axis wrist RMS and mean absolute second differences in millimetres.
 
-So this measures the deploy path: run the real sampler on identical
-observations, decode the EXECUTED block the way the rollout does, and compare
-against ground truth.  Two numbers matter:
-
-  * accuracy  -- per-axis wrist RMS error, in millimetres;
-  * roughness -- |2nd difference| along the predicted chunk, against the same
-    statistic on ground truth.  A model whose chunks are jerkier than the demos
-    produces visible jitter no matter how good its average error is.
-
-    python scripts/compare_sampled_action_quality.py \
-        --runs 2026-07-26_13-27-46:action-only \
-               2026-08-17_04-50-19:action+tactile \
-               2026-08-18_02-44-10:action+state+tactile \
-        --data_dir data/book_teleop --episodes 3 --anchors 256
+Usage and checkpoint selection are documented in README.md.
 """
 from __future__ import annotations
 

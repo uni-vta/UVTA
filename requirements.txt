@@ -1,9 +1,4 @@
-# Training + offline evaluation.  Versions are the ones the released results
-# were produced with; nearby versions are very likely fine, these are recorded
-# so a mismatch is diagnosable rather than mysterious.
-#
-# Install the torch wheel matching your CUDA driver FIRST
-# (https://pytorch.org/get-started/locally/), then run this file.
+# Training and offline evaluation. Install a CUDA-compatible PyTorch wheel first.
 torch==2.5.1
 torchvision==0.20.1
 
@@ -14,8 +9,7 @@ accelerate==1.2.1
 hydra-core==1.3.2
 omegaconf==2.3.0
 
-# Dataset storage.  imagecodecs supplies the codec the zarr episodes are
-# compressed with; without it the arrays open but every image read fails.
+# Zarr storage and image codecs.
 zarr==2.18.3
 numcodecs==0.13.1
 imagecodecs==2025.3.30

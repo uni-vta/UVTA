@@ -6,28 +6,10 @@ from torch import nn
 
 
 class WorldHead(nn.Module):
-    """Regress one future quantity from the (noise-free) conditioning vector.
+    """Regress future targets from the noise-free observation condition.
 
-    Deliberately NOT part of the diffusion target.  Putting the auxiliary blocks
-    in the trajectory means one UNet denoises all of them jointly for 16 steps,
-    so their residual uncertainty re-enters the action dims at every step.
-    Measured over 256 book_teleop anchors, all three models executing the action
-    block through an identical unnormalize + rot6d decode:
-
-        target composition      sampled wrist err x/y/z (mm)   step roughness y
-        action only             2.58 / 2.81 / 1.26             0.250
-        action + tactile        5.96 / 6.18 / 2.56             0.457
-        action + state + tactile 7.60 / 9.42 / 4.64            0.873
-        (teleop demos, reference)                              0.197
-
-    Note the training loss does NOT show this: on epsilon MSE the three sit at
-    2.35 / 3.14 / 3.04 mm, ranking all-on ABOVE action+tactile.  Training loss
-    scores one denoising step; deployment runs 16 coupled ones.
-
-    Reading the auxiliary targets off the conditioning keeps their supervision --
-    the gradient still flows through ``cond`` into the vision trunk -- while the
-    action's reverse process never sees them.  Same split as EgoWAM's separate
-    action / world-model heads and Dyna-2's two marginal fields over one trunk.
+    The MLP shares the visual encoder with the action head, but its targets
+    are not part of the diffusion trajectory. Output shape: (B, horizon, dim).
     """
 
     def __init__(self, cond_dim: int, horizon: int, dim: int, hidden: int = 512):

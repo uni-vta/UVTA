@@ -26,8 +26,8 @@ Third-party notices
 
 Portions of this repository are derived from DexUMI
 (https://github.com/real-stanford/DexUMI), released under the MIT License.
-Files under `uvta/` retain their upstream module and class names (for example
-`dexumi_dataset.py` / `DexUMIDataset`) to keep that lineage visible.
+This includes the policy utilities and the pose/joint trajectory interpolators
+in `cet/relative_policy_rollout_v2.py`.
 
 `third_party/glove_retargeting/` is vendored glove-to-hand retargeting code and
 carries its own upstream terms; see the headers of the files in that directory.

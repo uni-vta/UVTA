@@ -1,25 +1,9 @@
-"""Camera-ring overlay for sim-to-real domain matching.
+"""Overlay the robot camera ring on human frames for visual alignment.
 
-The real teleop / robot fisheye camera has a thin white reflective ring
-around the lens (see `data/20260514_teleop` for examples).  The
-exoskeleton (e.g. ``20260516_skeleton``) and manus-glove datasets are
-captured with a slightly different setup that does NOT include this
-ring, which causes a domain gap when training jointly with teleop.
-
-This module makes it easy to paint the teleop ring back onto exoskeleton
-and manus frames at data-loading time, so the network sees a consistent
-visual prior across all embodiments.
-
-The ring is described by two static assets (default in ``data/mask/``):
-
-* ``ring_mask.png``    : (H, W) uint8, 0 = ignore, 255 = ring pixel
-* ``ring_rgb_*.png``   : (H, W, 3) uint8, the actual ring texture (BGR
-  if loaded with ``cv2.imread``; this helper converts to RGB by
-  default).
-
-Apply formula (per pixel):
-    out[y, x] = ring_rgb[y, x]    if ring_mask[y, x] > 0
-                input[y, x]       otherwise
+The configured assets in assets/ring/ contain a binary ring mask and
+its texture. Masked pixels are replaced with the ring texture, resized to
+the input image dimensions. OpenCV-loaded BGR assets are converted to RGB
+when bgr2rgb_assets is enabled.
 """
 
 from __future__ import annotations
@@ -221,12 +205,8 @@ def canonical_embodiment(name: str) -> str:
     )
 
 
-# Repo root resolved at import time so the default ring assets stay
-# locatable even after hydra rewrites the working directory to its
-# experiment output folder.  ``ring_overlay.py`` lives at
-# ``<repo>/DexUMI/dexumi/diffusion_policy/dataloader/ring_overlay.py``
-# so going up 4 levels (dataloader -> diffusion_policy -> dexumi ->
-# DexUMI -> <repo>) gets us to the repo root.
+# Legacy asset fallback, resolved independently of Hydra's working directory.
+# The released config supplies explicit paths under UVTA_ROOT/assets/ring.
 _REPO_ROOT = osp.normpath(osp.join(osp.dirname(osp.abspath(__file__)), *([".."] * 4)))
 _DEFAULT_MASK_PATH = osp.join(_REPO_ROOT, "data/mask/default_ring/ring_mask.png")
 _DEFAULT_RGB_PATH = osp.join(_REPO_ROOT, "data/mask/default_ring/ring_patch_rgb.png")
@@ -259,9 +239,8 @@ def parse_overlay_cfg(overlay_cfg):
         rgb_path        : str, default <repo>/data/mask/default_ring/ring_patch_rgb.png
         bgr2rgb_assets  : bool, default True
 
-    Relative paths are resolved against the repo root so hydra's cwd
-    rewrite (to ``dexumi/experiment/dp/<timestamp>/``) does not break
-    asset loading.
+    Relative paths use the legacy asset root above. The released config
+    supplies absolute paths to avoid working-directory dependence.
 
     Returns
     -------

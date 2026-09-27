@@ -1,30 +1,17 @@
-data/mask/default_ring/ - the single source of truth for the wrist-camera
-fisheye 'white-ring' mask + ring-pixel patch used to overlay onto target
-images.
+Camera-ring overlay assets (384 x 480).
 
-Image size: 384 x 480 (matches all 20260*_teleop and 20260425_manus).
+Included:
+  ring_mask.png       binary mask, uint8 0/255
+  ring_patch_rgb.png  BGR ring pixels on a black background
 
-Files:
-  ring_mask.png         binary mask, uint8 0/255
-  ring_mask.npy         binary mask, uint8 0/1, shape (H, W)
-  ring_patch_rgb.png    BGR ring pixels on black background (3-ch)
-  ring_patch_rgba.png   BGRA ring pixels with alpha (alpha=0 elsewhere)
-  source.png            the teleop frame the ring pixels were sampled from
-                        (20260514_teleop/episode_0/frame_0)
-  overlay.png           red overlay of the ring on source, debug only
-  apply_manus_grid.png  10-frame manus apply sanity check (original/with-ring)
-  PROVENANCE.txt        this file
+The loader converts the texture to RGB when bgr2rgb_assets=True.
 
-Pipeline that produced these:
-  1. data/mask/20260428_teleop/_constant_ring/mask_clean.png
-       interactive SAM3 + elliptical-annulus clean-up
-  2. Extracted ring pixels from 20260514_teleop/episode_0/frame_0
-  3. Manually painted out left-bottom artefact via
-       scripts/paint_erase_interactive.py
+Provenance:
+  The mask was produced from the camera ring in the original teleoperation
+  data using SAM3 and elliptical-annulus cleanup. Ring pixels were sampled
+  from 20260514_teleop/episode_0/frame_0, then manually cleaned to remove a
+  lower-left artifact.
 
-Quick usage:
-  import numpy as np, cv2
-  mask     = np.load('data/mask/default_ring/ring_mask.npy').astype(bool)
-  ring_bgr = cv2.imread('data/mask/default_ring/ring_patch_rgb.png')
-  target   = cv2.imread('your_image.png').copy()
-  target[mask] = ring_bgr[mask]
+Only the mask and texture are included here; source recordings and debug
+images are not distributed. Asset paths are configured in
+configs/flip_book.yaml.

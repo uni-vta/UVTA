@@ -1,32 +1,11 @@
-"""Run a FROZEN stage-1 policy over a teleop dataset and pack its predictions.
+"""Sample a frozen policy on a dataset for evaluation or rollout caches.
 
-One source of truth for two consumers:
+Each anchor packs the full prediction horizon in arm-contiguous blocks:
+[eef_rel(6), joint(22), tactile(F)] per arm. Pose and joint values are
+decoded to physical units; tactile stays on the network scale.
 
-  * ``scripts/gen_stage1_rollout_cache.py`` -- writes ONE draw to disk, which
-    ``Stage1RolloutTeleopDataset`` then reads back.
-  * ``Stage1OnlineRolloutDataset`` -- keeps the runner alive and re-draws every
-    epoch, so stage 2 never sees the same frozen prediction twice.
-
-Both need the identical observation pipeline, rot6d decode and packing, so a
-divergence between them would be an experiment-invalidating bug rather than a
-cosmetic one.
-
-Packing.  Per anchor ``t`` the row is ARM-CONTIGUOUS over stage 1's FULL
-``pred_horizon`` (``H1``), not the shorter ``action_horizon`` it executes:
-
-    [arm0: eef_rel(6) | joint(22) | tactile(F) , arm1: ... ]   x H1
-
-``eef_rel`` and ``joint`` are PHYSICAL (needed for the SE(3) composition);
-``tactile`` stays on the NETWORK scale [-1, 1] because ``clip_sample`` already
-bounds it and stage 2 consumes it unchanged.
-
-Noise.  The initial noise is a deterministic function of ``(seed, sample
-index)`` and NOT of batch size, worker count or DDP sharding.  A draw is
-therefore reproducible, and a sharded online refresh reproduces a
-single-process offline cache: verified bit-exact at equal world size, and equal
-to within float32 kernel non-determinism across world sizes (measured mean
-2e-7 rad, 99% of values bit-identical, worst element 3e-4 rad -- four orders of
-magnitude below the genuine draw-to-draw spread).
+Noise is seeded by (seed, sample index), independently of batch size or
+worker assignment.
 """
 from __future__ import annotations
 
@@ -66,7 +45,7 @@ def build_stage1_obs_dataset(model_cfg, data_dir, max_episode, verbose=True,
 
     match = None
     for d, e in zip(dirs, embs):
-        # stage 1's paths are relative to the DexUMI/ working dir ("../data/...")
+        # Match paths recorded relative to the original training directory.
         if os.path.normpath(d).endswith(target) or target.endswith(
             os.path.normpath(d).lstrip("./").lstrip("../")
         ):

@@ -1,35 +1,17 @@
-# Camera ready version for flip book task.
-# Input: Wrist cam + fsr_region without proprioception
-# Output: Action + Tactile
-# Human demo nums: 1000
-# Robot demo nums: 150
-# Every path below is rooted here.  Set it to wherever you cloned UVTA:
-#   export UVTA_ROOT=/path/to/UVTA
+# UVTA co-training: wrist RGB + fingertip tactile -> actions + future tactile.
+# Set UVTA_ROOT to the repository path; UVTA_DATA_ROOT defaults to its data/.
 uvta_root: ${oc.env:UVTA_ROOT}
-# Where the zarr datasets live.  Defaults to <UVTA_ROOT>/data.
 data_root: ${oc.env:UVTA_DATA_ROOT,${oc.env:UVTA_ROOT}/data}
 
-# ------------------------------------------------------------------
-# Which task to train.  ONE config covers all five: the released dataset
-# lays every task out identically as <data_root>/<task>/{robot,human},
-# with the episode counts already capped at collection time, so the task
-# name is the only thing that varies.
-#
-#   python scripts/train.py task=switch
-#
-# One caveat: the light_bulb result in the paper used 500 epochs, the rest
-# 300.  Pass `training.epochs=500` for that task -- the LR schedule follows
-# automatically (see lr_scheduler_steps_epochs below).
-# ------------------------------------------------------------------
+# Shared task configuration; light_bulb uses training.epochs=500.
 task: flip_book   # flip_book | light_bulb | switch | ball | tube
+
 hydra:
   run:
     dir: ${oc.env:UVTA_OUTPUT_DIR,${oc.env:UVTA_ROOT}/experiments}/${now:%Y-%m-%d_%H-%M-%S}
 
-
 project_name: UVTA
 task_name: ${task}
-
 
 debug: False
 action_dim: 31
@@ -48,7 +30,7 @@ training:
   batch_size: 250
   num_workers: 4
   shuffle: True
-
+  # Uniform sampling balances datasets; epoch length still depends on size.
   sampler: uniform
   seed: 0
   pin_memory: False
@@ -61,53 +43,20 @@ training:
   use_ema: True
   log_interval: 50
   log_detailed_loss: True
-  # ------------------------------------------------------------------
-  # Group-balanced diffusion loss (back-prop reweighting).
-  #
-  # The diffusion target here is the ACTION block only (tactile rides a head and
-  # the state block is off), so the table has just two groups: without the
-  # reweighting a plain full-tensor MSE would hand the wrist 9/31 and the joints
-  # 22/31 purely because of their widths.  Equal weights make each a per-dim mean
-  # at half the diffusion loss.
-  #
-  # Keys MUST match the group names the trainer builds -- ``<block>_eef`` and
-  # ``<block>_hand`` for every enabled motor block.  With predict_state off the
-  # only block is ``action``, so ``state_*`` keys never resolve: ``_gw`` finds
-  # neither them nor the ``eef`` / ``hand`` aliases and silently falls back to
-  # 1.0, which makes such a table look effective while doing nothing.
-  # ------------------------------------------------------------------
+  # Equal wrist/hand MSE weights; tactile MSE is added with weight 0.2.
   balanced_action_loss: True
   action_loss_group_weights:
     action_eef: 1.0
     action_hand: 1.0
-  # ------------------------------------------------------------------
-  # World-head weights.  ABSOLUTE, not renormalized -- unlike the table above.
-  # The full back-prop scalar is
-  #
-  #   loss = [ 0.5*mse(action_eef) + 0.5*mse(action_hand) ] + w * mse(tactile)
-  #          \__ group table, always renormalized to total weight 1 __/
-  #
-  # so the NOMINAL tactile share is w/(1+w), and the REALIZED share is
-  # w*T/(D + w*T) with D and T the two logged MSEs.  On the v48 run those
-  # converged to D=0.003550 and T=0.003352 (ratio 0.94), which puts w=0.2 at
-  # 15.9%, w=0.4 at 27.4% and w=1.0 at 48.6%.  Note w moves the total gradient
-  # magnitude as well as the split, so doubling it is not a pure rebalance.
-  #
-  # 0.2 is the trainer's hard-coded default if this block is deleted, and keeps
-  # the tactile a means (shaping the shared trunk) rather than an end.  Raise it
-  # if ``aux head tactile loss`` plateaus high AND a good tactile estimate is
-  # actually wanted; lower it if the action curves come out worse than the
-  # ``aux_as_head=[]`` baseline's, which is the signal that the head is competing
-  # for trunk capacity.
-  # ------------------------------------------------------------------
+
   world_head_weights:
     tactile: 0.2
   world_head_hidden: 512
   log_per_embodiment_loss: True
 
-
 validation:
   enabled: False
+  # null evaluates all episodes in the configured validation stores.
   max_episode: null
   eval_frequency: 20
   batch_size: 200
@@ -116,9 +65,7 @@ validation:
   persistent_workers: True
   use_ema: True
   seed: 1234
-  # Held-out set, only built when ``enabled`` is True.  Point this at
-  # episodes that are NOT in dataset.data_dirs below -- as written it would
-  # re-score the training set, which tells you nothing.
+  # Replace with held-out paths before enabling validation.
   datasets:
     - name: robot
       data_dirs: [
@@ -145,19 +92,13 @@ optimizer:
 
 lr_scheduler: "cosine"
 num_warmup_steps: 300
-# Cosine anneal horizon, in EPOCHS.  MUST equal training.epochs: the schedule is
-# a cosine over this many epochs, so leaving it at 500 for a 300-epoch run ends
-# training at ~35% of peak LR with the loss still visibly descending -- the run
-# is truncated, not converged.  Change both together, including on the CLI.
+# Keep the cosine horizon tied to the training duration.
 lr_scheduler_steps_epochs: ${training.epochs}
 lr_min_ratio: 1e-2
 
 dataset:
   _target_: uvta.diffusion_policy.dataloader.uvta_dataset.UVTADataset
-  # ------------------------------------------------------------------
-  # CO-TRAINING: every dataset with its embodiment in data_dirs_embodiment
-  # (same length / order).  human -> no camera ring; robot -> has the ring.
-  # ------------------------------------------------------------------
+  # Paths and embodiment labels must have matching order.
   data_dirs: [
     "${data_root}/${task}/robot",
     "${data_root}/${task}/human",
@@ -172,9 +113,8 @@ dataset:
   unnormal_list: ["camera_0","pose"]
   optional_transforms: ["Resize","RandomCrop","ColorJitter","RandomGrayscale","GaussianBlur"]
   relative_hand_action: False
-  # ------------------------------------------------------------------
-  # Normalization.
-  # ------------------------------------------------------------------
+
+  # Normalize human and robot data separately; deploy with robot statistics.
   norm_method: minmax
   norm_clip_sigma: null
   norm_clip_percentile: 1.0
@@ -183,16 +123,9 @@ dataset:
   stats_primary_embodiment: robot
   proprio_mode: none
   skip_proprioception: True
-  # ------------------------------------------------------------------
-  # hand_action_mode: the hand part of each motor block.
-  #   none | joint | fingertip | joint_only | fingertip_only
-  # ------------------------------------------------------------------
   hand_action_mode: joint
-  # Single-stage direct rollout: deploy executes the COMMAND block and the
-  # tactile rides an auxiliary head.  ``predict_state: False`` is load-bearing
-  # and must stay spelled out -- the key resolves to True when ABSENT (dataset
-  # and RealPolicy both do ``True if predict_state is None``), so deleting the
-  # line turns the state block back on at train and at deploy.
+
+  # Keep predict_state explicitly false; tactile uses a separate MLP head.
   predict_action: True
   predict_state: False
   predict_tactile: True
@@ -203,30 +136,19 @@ dataset:
     mask_path: ${uvta_root}/assets/ring/ring_mask.png
     rgb_path:  ${uvta_root}/assets/ring/ring_patch_rgb.png
     bgr2rgb_assets: True
-  # ------------------------------------------------------------------
-  # TACTILE input (also the tactile block's target).
-  # ------------------------------------------------------------------
+
   enable_fsr: True
   fsr_source_key: tactile
   fsr_binarize: False
   fsr_binary_cutoff: [100]
   fsr_baseline_correct: True
   fsr_baseline_frames: 5
-  # ROBOT: subtract its FIRST frame only.  Its resting reading is either a hard
-  # zero or a constant per-session DC offset, so one frame estimates it exactly
-  # (measured: first-frame vs mean-of-5 differ by <0.001% of the signal).
-  # HUMAN: mean of `fsr_baseline_frames` -- the glove's rest is NOISY (std ~2
-  # within that window), so averaging is the sturdier estimate there.
-  # First-frame takes precedence if an embodiment appears in both lists.
-  # Deploy is NOT exempt: RealPolicy re-reads these keys and subtracts the same
-  # baseline from the live stream (clamped at 0), so it needs no restating there.
+  # Human: mean of first five frames. Robot: first frame. Clamp at zero.
   fsr_baseline_embodiments: [human]
   fsr_baseline_first_frame_embodiments: [robot]
   bgr2rgb: False
-  # Per-dataset episode budget, aligned to data_dirs in the same order.
-  # ``null`` = all episodes of that dataset.
+  # Per-dataset episode limits; null loads all episodes.
   max_episode: [null, null]
-
 
 model:
   _target_: uvta.diffusion_policy.diffusion_policy.DiffusionPolicy

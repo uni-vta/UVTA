@@ -5,19 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "uvta"
 version = "0.1.0"
-description = "UVTA: co-training a visuo-tactile diffusion policy on human and robot demonstrations"
+description = "UVTA: Unified Visual-Tactile-Action Modeling from Human Demonstrations for Dexterous Manipulation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 
-# Runtime deps live in requirements.txt rather than here: torch has to be
-# installed against the right CUDA build first, and putting it in
-# `dependencies` makes `pip install -e .` silently pull a wheel that may not
-# match the driver.
+# Install requirements.txt after selecting a CUDA-compatible PyTorch wheel.
 dependencies = []
 
 [tool.setuptools.packages.find]
-# Only the importable library.  `scripts/`, `cet/` and `deform_to_human/` are
-# run in place -- the rollout resolves those sibling directories by path at
-# runtime -- so they are intentionally not packaged.
+# Package the library; run scripts and hardware utilities from the clone.
 include = ["uvta*"]

@@ -1,32 +1,13 @@
-"""Robot rollout v2: receding-horizon + trajectory-interpolation smoothing.
+"""Synchronous UVTA rollout with receding-horizon trajectory interpolation.
 
-Same Method-B relative-pose policy as ``relative_policy_rollout.py``, but the
-action-chunk execution path follows DexUMI ``eval_xhand.py`` rather than ACT
-temporal ensembling (that lives in ``relative_policy_rollout_v1.py``):
+Predict a full chunk, decode relative wrist targets, discard stale waypoints,
+and interpolate wrist and hand commands until the next replan. Chunks are
+not temporally ensembled.
 
-    obs -> predict_action (full chunk)
-        -> relative pose -> absolute pose
-        -> discard past actions by latency
-        -> schedule_waypoint -> Pose/Motor trajectory interpolation
-        -> sample interpolators each control step -> arm IK -> the robot
-        -> after exec_horizon * dt, replan (no cross-chunk weighted mix)
-
-Aligned with the *Method B* sample layout used by the trainer (see
-``DexUMI/dexumi/diffusion_policy/dataloader/uvta_dataset.py`` and the
-``train_diffusion_policy_v18+`` configs):
-
-    sample length = (obs_horizon - 1) * down_sample_steps + pred_horizon
-    obs window    = sample[0 :: d, ..., (H-1)*d]      (anchor = t @ (H-1)*d)
-    action target = sample[(H-1)*d : (H-1)*d + pred_horizon]
-                    -> action[k] = T_state(t)^{-1} @ T_action(t+k)
-
-The eef action comes from the ``pose_action`` stream anchored on STATE
-``pose[t]``, so ``action[0]`` is the real first commanded step
-(``--anchor_offset 0``).  Legacy identity-anchor checkpoints use
-``--anchor_offset 1``.
-
-Proprio handling is automatic from ``policy.proprio_mode``; the legacy
-``--use_right_proprio`` flag still works for back-compat.
+Targets follow uvta/diffusion_policy/dataloader/uvta_dataset.py:
+action[k] = pose[t]^-1 @ pose_action[t+k]. The first commanded step is
+executed with --anchor_offset 0; offset 1 is for legacy identity-anchor
+checkpoints. Proprioceptive inputs follow the saved policy config.
 """
 
 from __future__ import annotations
@@ -1366,11 +1347,9 @@ def _build_per_step_proprio_inputs(
 
 
 # =========================================================
-# V2 DexUMI-style receding-horizon + trajectory interpolation
+# V2 receding-horizon execution and trajectory interpolation
 # =========================================================
-# Fixed deploy defaults (not CLI flags), mirroring v1's reproducible-variant
-# style.  Tunable after measuring the real robot.  These match DexUMI
-# ``eval_xhand`` / ``ur5.py`` defaults where applicable.
+# Fixed deployment defaults; calibrate latency and speed limits on the robot.
 _V2_ROBOT_ACTION_LATENCY = 0.1
 _V2_HAND_ACTION_LATENCY = 0.3
 _V2_MAX_POS_SPEED = 0.25  # m/s
@@ -1394,11 +1373,7 @@ def _pose_distance(start_pose, end_pose):
 
 
 class PoseTrajectoryInterpolator:
-    """Linear position + Slerp orientation interpolator (DexUMI copy).
-
-    Vendored from ``dexumi/real_env/common/pose_trajectory_interpolator.py``
-    so this file stays self-contained and omits the upstream debug print.
-    """
+    """Linear position and Slerp orientation interpolation; see LICENSE."""
 
     def __init__(self, times: np.ndarray, poses: np.ndarray):
         assert len(times) >= 1
@@ -1499,7 +1474,7 @@ class PoseTrajectoryInterpolator:
 
 
 class MotorTrajectoryInterpolator:
-    """Linear joint-space interpolator (DexUMI copy, no debug print)."""
+    """Linear joint-space interpolation; see LICENSE for upstream attribution."""
 
     def __init__(self, times: np.ndarray, values: np.ndarray):
         assert len(times) >= 1 and len(values) == len(times)
@@ -1673,14 +1648,14 @@ def _schedule_chunk_into_interpolators(
     max_rot_speed: float,
     max_hand_speed: float,
 ) -> Tuple[PoseTrajectoryInterpolator, MotorTrajectoryInterpolator, int, int]:
-    """Schedule still-valid chunk waypoints (DexUMI eval_xhand discard rule)."""
+    """Schedule chunk waypoints that remain valid after actuator latency."""
     n_action = len(poses)
     t_exec = time.monotonic()
     robot_times_mono = t_actual_inference_mono + np.arange(n_action) * dt
     hand_times_mono = t_actual_inference_mono + np.arange(n_action) * dt
     valid_robot = robot_times_mono >= (t_exec + robot_action_latency + dt)
     valid_hand = hand_times_mono >= (t_exec + hand_action_latency + dt)
-    # Convert to wall clock for schedule_waypoint (matches eval_xhand).
+    # Convert to wall clock for schedule_waypoint.
     robot_times = robot_times_mono - time.monotonic() + time.time()
     hand_times = hand_times_mono - time.monotonic() + time.time()
 
@@ -1935,7 +1910,7 @@ def main(args):
     relative_hand_action = bool(
         getattr(policy.model_cfg.dataset, "relative_hand_action", False)
     )
-    # Steps executed since the last predict+schedule (DexUMI receding horizon).
+    # Steps executed since the last chunk was predicted and scheduled.
     steps_since_replan = chunk_exec_steps  # force first-loop replan
     pose_interp: Optional[PoseTrajectoryInterpolator] = None
     hand_interp: Optional[MotorTrajectoryInterpolator] = None
@@ -1972,7 +1947,7 @@ def main(args):
 
     legacy_joint_proprio: Optional[np.ndarray] = None
     print("======================================")
-    print("Start Rollout with relative policy (v2 DexUMI smoothing)")
+    print("Start UVTA rollout (v2 trajectory smoothing)")
     print(f"  model_path        : {args.model_path}")
     print(f"  ckpt              : {args.ckpt}")
     print(f"  use_ema           : {args.use_ema if args.use_ema is not None else '(follow config)'}")
@@ -2008,7 +1983,7 @@ def main(args):
     )
     print(
         "  smoothing_v2      : receding-horizon + Pose/Motor trajectory "
-        "interpolation (DexUMI eval_xhand style; NO temporal ensemble)"
+        "interpolation (no temporal ensemble)"
     )
     print(
         "  v2 latencies      : "
@@ -2039,7 +2014,7 @@ def main(args):
         )
 
     # Seed trajectory interpolators with the live state so the first
-    # schedule_waypoint has a valid trim origin (DexUMI starts the same way).
+    # schedule_waypoint has a valid trim origin.
     _seed_obs = get_latest_robot_obs(robot_env)
     _seed_pose = get_current_right_wrist_pose6d(_seed_obs, ik_solver)
     _seed_hand = _seed_obs["right_hand"].astype(np.float32)
@@ -2091,7 +2066,7 @@ def main(args):
                 fsr=fsr,
             )
 
-            # 3) DexUMI receding-horizon: replan every ``chunk_exec_steps``,
+            # 3) Replan every ``chunk_exec_steps``,
             # decode the full chunk to absolute targets, discard past
             # waypoints by latency, and schedule the rest into interpolators.
             # There is NO overlapping-chunk temporal ensemble (that is v1).
@@ -2174,7 +2149,7 @@ def main(args):
                     rebuild_debug_video(debug_imgs_dir, video_path, fps=args.control_hz)
 
             # 4) Sample the scheduled Pose/Motor trajectories at wall-clock
-            # time (DexUMI's servo loop does the same via the interpolator).
+            # time.
             assert pose_interp is not None and hand_interp is not None
             assert output is not None
             t_now = time.time()
@@ -2387,7 +2362,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        "Robot rollout v2 with DexUMI receding-horizon + trajectory interpolation"
+        "UVTA robot rollout v2 with receding-horizon trajectory interpolation"
     )
 
     # policy
@@ -2413,7 +2388,7 @@ if __name__ == "__main__":
         default=None,
         help=(
             "How many control steps to execute from a scheduled chunk before "
-            "re-planning (DexUMI receding horizon).  Defaults to "
+            "replanning. Defaults to "
             "action_horizon - anchor_offset.  Smaller values replan more often."
         ),
     )

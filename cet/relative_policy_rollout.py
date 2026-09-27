@@ -1,46 +1,14 @@
-"""Robot rollout driver for the UVTA relative-pose policy.
+"""Asynchronous robot rollout for the UVTA relative-pose policy.
 
-Aligned with the *Method B* sample layout used by the trainer (see
-``DexUMI/dexumi/diffusion_policy/dataloader/uvta_dataset.py`` and the
-``train_diffusion_policy_v18+`` configs):
+Observations follow uvta/diffusion_policy/dataloader/uvta_dataset.py.
+Each wrist target is pose[t]^-1 @ pose_action[t+k]; execute the first
+predicted target with --anchor_offset 0. Use offset 1 only for legacy
+checkpoints whose first target is the identity.
 
-    sample length = (obs_horizon - 1) * down_sample_steps + pred_horizon
-    obs window    = sample[0 :: d, ..., (H-1)*d]      (anchor = t @ (H-1)*d)
-    action target = sample[(H-1)*d : (H-1)*d + pred_horizon]
-                    -> action[k] = T_state(t)^{-1} @ T_action(t+k)
-
-The eef action now comes from the ``pose_action`` stream (the real commanded
-next-state target) anchored on the current STATE ``pose[t]``, so
-``action[0] = pose[t]^{-1} @ pose_action[t]`` is the REAL first commanded step
-(NOT the identity) and is executed at rollout time (``--anchor_offset 0``,
-default).  Legacy checkpoints that reused ``pose`` as the action had
-``action[0] = identity`` and skipped it with ``--anchor_offset 1``.
-
-The asynchronous worker asks the policy for the full
-``(pred_horizon, action_dim_legacy)`` block.  Returning the prediction suffix
-beyond ``action_horizon`` gives the control thread enough old-plan coverage
-while the next CUDA inference is running.
-
-What this script does
----------------------
-
-1.  Pull one coherent observation bundle and its producer timestamp from
-    ``RobotEnv``; repeated polls of the same bundle are not inserted into the
-    policy history a second time.
-2.  Push each fresh image/proprio/tactile bundle into the policy's rolling
-    observation buffer, whose strided horizon is selected internally.
-3.  Decode every executable frame in a predicted chunk into absolute wrist
-    and hand waypoints on the observation's timeline.  Stale waypoints are
-    discarded after accounting for inference and actuator latency.
-4.  Sample continuous wrist (xyz + SO(3)) and hand trajectories at control
-    rate, run warm-started arm IK, then apply arm/hand joint velocity and
-    acceleration limits.
-5.  Send non-immediate commands through the robot's FIFO; monotonic deadlines
-    skip missed ticks instead of emitting a catch-up burst.
-
-Proprio handling is automatic from ``policy.proprio_mode``; the legacy
-``--use_right_proprio`` flag still works for back-compat but is no longer
-needed for new v14+ configs.
+The worker predicts full action chunks while the control loop interpolates
+valid waypoints, compensates for latency, solves IK, and applies joint
+velocity/acceleration limits. Observation timestamps prevent duplicate
+history entries. Proprioceptive inputs follow the saved policy config.
 """
 
 from __future__ import annotations

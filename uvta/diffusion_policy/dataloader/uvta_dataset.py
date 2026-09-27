@@ -1,50 +1,14 @@
-"""Dataset for the DexUMI diffusion policy.
+"""Observation windows and action targets for the UVTA diffusion policy.
 
-This file is the **single source of truth** for the per-sample tensor layout
-fed to ``DiffusionPolicy.forward``.  Three design choices that the trainer
-relies on:
+Observations are sampled at [t-(H-1)*d, ..., t], where H is obs_horizon
+and d is down_sample_steps. Indices before episode start repeat the first
+frame. proprio_mode selects joint, relative wrist, or fingertip inputs.
 
-1.  ``obs_horizon`` and ``down_sample_steps`` are configurable.  Every
-    observation key (camera / proprioception / fsr / ee_rel) is sampled at
-    the timestamps ``[t - (H-1)·d, ..., t - d, t]`` where ``H = obs_horizon``,
-    ``d = down_sample_steps`` and ``t`` is the anchor index of the sample.
-    When the anchor is near the start of an episode and the formula reaches
-    indices before episode start, we clamp to the first frame (equivalent to
-    repeating the first frame).  This mirrors the UMI ``SequenceSampler``
-    semantics that we surveyed in the UMI reference implementation.
-
-2.  ``proprio_mode`` selects what is fed as ``proprioception``:
-        - ``"joint"``             : 22-D hand joint angles only (legacy)
-        - ``"ee_rel"``            :  9-D wrist pose relative to current frame
-        - ``"both"``              :  joint + ee_rel = 31-D
-        - ``"fingertip"``         : 5 fingertips x 9-D = 45-D in wrist frame
-        - ``"fingertip_with_ee"`` : fingertip + ee_rel = 54-D
-
-3.  **Network I/O uses 6D continuous rotation (Zhou et al. 2019), not
-    axis-angle rotvec.**  This follows UMI exactly (see
-    UMI's ``diffusion_policy/dataset/umi_dataset.py``
-    line 356, ``mat_to_pose10d``).  Reasoning:
-      * rotvec has a discontinuity at angle ≈ ±π (same rotation has multiple
-        rotvec representations);
-      * quaternions have double cover (q and -q describe the same rotation);
-      * rot6d is a continuous SO(3) → R^6 embedding, ideal for diffusion regression.
-    Therefore every SE(3) carried by the proprio / action tensors is laid out
-    as ``[x, y, z, m00, m01, m02, m10, m11, m12]`` = 9D (xyz + first two rows
-    of the rotation matrix).  Conversion happens only at the dataset I/O
-    boundary: zarr stores 6-D xyz+rotvec, and the dataset converts to
-    xyz+rot6d before stacking into the sample tensors.
-
-Normalization strategy (UMI-style, see UMI ``get_normalizer``):
-    * **xyz (position)** : range-normalized to [-1, 1] using min/max stats.
-    * **rot6d (rotation)**: identity (no normalization).  rot6d entries are
-      bounded by the rotation matrix structure (each element in [-1, 1])
-      so they are already on the right scale.
-    * Joint angles: range-normalized via the parent class's default path.
-
-Pose convention (zarr storage, unchanged since 2026-05 flip): every 6-D
-pose stored in zarr is ``[x, y, z, rx, ry, rz]`` with axis-angle rotvec.
-This matches ``vec6dof_to_homogeneous_matrix``.  The dataset just converts
-to rot6d before exposing to the model.
+Stored poses use xyz + axis-angle rotation vectors (6-D). Network poses use
+xyz + the first two rows of the rotation matrix (9-D continuous rotation;
+Zhou et al., 2019). Position and hand targets are range-normalized; rotation
+entries use identity normalization. Output blocks are selected by
+predict_action, predict_state, and predict_tactile.
 """
 
 from __future__ import annotations
@@ -517,8 +481,8 @@ class UVTADataset(DiffusionBCDataset):
 
         # --- normalization config safety net ----------------------------
         # mean-std (z-score) normalization is UNBOUNDED.  If the diffusion
-        # noise scheduler uses ``clip_sample=True`` (the default in every
-        # DexUMI config), an unbounded action target gets clamped to [-1, 1]
+        # noise scheduler uses ``clip_sample=True``, as in the default
+        # training config, an unbounded action target gets clamped to [-1, 1]
         # at sample time, silently destroying any action beyond ~1 sigma.
         # The fix is ``norm_clip_sigma`` (clamp to ±sigma and rescale onto
         # [-1, 1]).  It is easy to forget to set it when switching to
