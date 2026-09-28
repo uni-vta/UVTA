@@ -2,7 +2,7 @@
 
 **Unified Visual-Tactile-Action Modeling from Human Demonstrations for Dexterous Manipulation**
 
-[Project website](https://uni-vta.github.io/) · [Code](https://github.com/uni-vta/UVTA)
+[Project website](https://uni-vta.github.io/) · [Data](https://github.com/uni-vta/UVTA)· [Paper](https://github.com/uni-vta/UVTA)
 
 ## Introduction
 
