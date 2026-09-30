@@ -2,7 +2,7 @@
 
 **Unified Visual-Tactile-Action Modeling from Human Demonstrations for Dexterous Manipulation**
 
-[Project website](https://uni-vta.github.io/) · [Data](https://github.com/uni-vta/UVTA)· [Paper](https://github.com/uni-vta/UVTA)
+[Project website](https://uni-vta.github.io/) · [Dataset](https://huggingface.co/datasets/Chopper233/UVTA) · [Paper](https://arxiv.org/abs/2609.34182)
 
 ## Introduction
 
@@ -36,7 +36,32 @@ not included in this repository.
 
 ## Data
 
-Each task has separate human and robot Zarr stores:
+Download the released data from [Hugging Face](https://huggingface.co/datasets/Chopper233/UVTA).
+It contains **Zarr v2 stores packaged into 28 `.tar` shards** (about 482 GB in
+total), not Hugging Face Arrow tables or WebDataset samples. Download only the
+tasks you need and allow space for both the archives and extracted data.
+
+For example, download and extract all human/robot shards for `flip_book`:
+
+```bash
+pip install huggingface_hub
+hf download Chopper233/UVTA --repo-type dataset \
+    --include "flip_book/*" --include "MANIFEST.json" \
+    --local-dir "$UVTA_ROOT/downloads"
+
+mkdir -p "$UVTA_DATA_ROOT"
+for archive in "$UVTA_ROOT"/downloads/flip_book/*.tar; do
+    tar -xf "$archive" -C "$UVTA_DATA_ROOT"
+done
+```
+
+Replace `flip_book` in both commands for another task. Extract **all shards of
+each selected embodiment into the same data root**, preserving the archive paths
+and hidden `.zgroup`/`.zarray` metadata; do not strip directory components or
+create a separate directory per shard. `MANIFEST.json` lists the archive sizes,
+SHA-256 checksums, and episode IDs. The loader reads extracted directories, not
+`.tar` files, so point `UVTA_DATA_ROOT` at the directory containing the task
+folders:
 
 ```text
 <data_root>/<task>/
@@ -59,6 +84,18 @@ proprioception (T, 22)       observed hand joint angles
 hand_action    (T, 22)       target hand joint angles
 tactile        (T, 20)       four tactile regions per fingertip
 ```
+
+The released `tactile` field is already pooled into 20 regions; it is not a raw
+tactile image or a 100-taxel vector and does not need another VTPM conversion.
+Use the default `fsr_source_key: tactile`, `hand_action_mode: joint`, and
+`load_camera_ids: [0]`. The loader converts the stored 6-D wrist poses to 9-D
+relative wrist targets, giving 31-D actions together with the 22 hand joints.
+Optional fingertip-pose targets and additional cameras are not in this release.
+
+The manifest contains 1,000 human episodes per task and 150 robot episodes per
+task, except `flip_book`, which contains 149 robot episodes. The replay buffer
+loads selected episodes into RAM; use `'dataset.max_episode=[1,1]'` for an initial
+small-data check before loading a full task.
 
 Human and robot streams use separate normalization statistics. The loader
 subtracts the first robot frame or the mean of the first five human frames
