@@ -165,10 +165,14 @@ and `third_party/` in their repository locations.
 ## Citation
 
 ```bibtex
-@misc{uvta2026,
-  title = {Unified Visual-Tactile-Action Modeling from Human Demonstrations for Dexterous Manipulation},
-  year  = {2026},
-  url   = {https://uni-vta.github.io/}
+@misc{li2026unifiedvisualtactileactionmodelinghuman,
+  title={Unified Visual-Tactile-Action Modeling from Human Demonstrations for Dexterous Manipulation},
+  author={Wenqiao Li and Qianyou Zhao and Jiawen Hao and Xuezhou Zhu and Tengyu Liu and Kaifeng Zhang and Chuan Wen and Siyuan Huang},
+  year={2026},
+  eprint={2609.34182},
+  archivePrefix={arXiv},
+  primaryClass={cs.RO},
+  url={https://arxiv.org/abs/2609.34182},
 }
 ```
 
